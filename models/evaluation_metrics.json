@@ -1,0 +1,72 @@
+{
+    "accuracy": 1.0,
+    "precision": 1.0,
+    "recall": 1.0,
+    "f1_score": 1.0,
+    "class_report": {
+        "Healthy": {
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1-score": 1.0,
+            "support": 200.0
+        },
+        "AWGN Noise": {
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1-score": 1.0,
+            "support": 200.0
+        },
+        "Rayleigh Fading": {
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1-score": 1.0,
+            "support": 200.0
+        },
+        "Tone Interference": {
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1-score": 1.0,
+            "support": 200.0
+        },
+        "accuracy": 1.0,
+        "macro avg": {
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1-score": 1.0,
+            "support": 800.0
+        },
+        "weighted avg": {
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1-score": 1.0,
+            "support": 800.0
+        }
+    },
+    "confusion_matrix": [
+        [
+            200,
+            0,
+            0,
+            0
+        ],
+        [
+            0,
+            200,
+            0,
+            0
+        ],
+        [
+            0,
+            0,
+            200,
+            0
+        ],
+        [
+            0,
+            0,
+            0,
+            200
+        ]
+    ],
+    "test_samples": 800
+}

@@ -1,0 +1,7 @@
+{
+  "evaluated_at_utc": "2026-10-30T18:41:56.258318+00:00",
+  "test_samples": 1000,
+  "baseline_accuracy": 1.0,
+  "samples_per_class": 250,
+  "permutation_repeats": 15
+}

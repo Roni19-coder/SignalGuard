@@ -1,0 +1,16 @@
+{
+  "evaluated_at_utc": "2026-10-30T18:41:49.701283+00:00",
+  "samples_per_snr": 250,
+  "snr_levels_db": [
+    -10,
+    -5,
+    0,
+    5,
+    10,
+    15,
+    20
+  ],
+  "total_awgn_samples": 1750,
+  "overall_awgn_detection_rate_percent": 99.94285714285715,
+  "note": "AWGN-only evaluation. This is not four-class overall accuracy."
+}
