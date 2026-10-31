@@ -1,0 +1,88 @@
+{
+  "evaluation_time_utc": "2026-10-31T04:46:29.925416+00:00",
+  "evaluation_type": "fixed_snr_robustness",
+  "snr_levels_db": [
+    -5,
+    0,
+    5,
+    10,
+    15,
+    20
+  ],
+  "samples_per_class_per_snr": 200,
+  "class_names": [
+    "Healthy",
+    "AWGN",
+    "Rayleigh fading",
+    "Tone interference"
+  ],
+  "results": [
+    {
+      "snr_db": -5,
+      "accuracy": 0.74875,
+      "macro_precision": 0.6246882793017456,
+      "macro_recall": 0.74875,
+      "macro_f1": 0.6657627846654907,
+      "Healthy_recall": 1.0,
+      "AWGN_recall": 1.0,
+      "Rayleigh fading_recall": 0.0,
+      "Tone interference_recall": 0.995
+    },
+    {
+      "snr_db": 0,
+      "accuracy": 0.75125,
+      "macro_precision": 0.87531328320802,
+      "macro_recall": 0.75125,
+      "macro_f1": 0.6694324703693553,
+      "Healthy_recall": 1.0,
+      "AWGN_recall": 1.0,
+      "Rayleigh fading_recall": 0.005,
+      "Tone interference_recall": 1.0
+    },
+    {
+      "snr_db": 5,
+      "accuracy": 0.9975,
+      "macro_precision": 0.9975247524752475,
+      "macro_recall": 0.9975,
+      "macro_f1": 0.9974999374984375,
+      "Healthy_recall": 1.0,
+      "AWGN_recall": 1.0,
+      "Rayleigh fading_recall": 1.0,
+      "Tone interference_recall": 0.99
+    },
+    {
+      "snr_db": 10,
+      "accuracy": 1.0,
+      "macro_precision": 1.0,
+      "macro_recall": 1.0,
+      "macro_f1": 1.0,
+      "Healthy_recall": 1.0,
+      "AWGN_recall": 1.0,
+      "Rayleigh fading_recall": 1.0,
+      "Tone interference_recall": 1.0
+    },
+    {
+      "snr_db": 15,
+      "accuracy": 1.0,
+      "macro_precision": 1.0,
+      "macro_recall": 1.0,
+      "macro_f1": 1.0,
+      "Healthy_recall": 1.0,
+      "AWGN_recall": 1.0,
+      "Rayleigh fading_recall": 1.0,
+      "Tone interference_recall": 1.0
+    },
+    {
+      "snr_db": 20,
+      "accuracy": 0.99875,
+      "macro_precision": 0.9987562189054726,
+      "macro_recall": 0.99875,
+      "macro_f1": 0.9987499921874512,
+      "Healthy_recall": 1.0,
+      "AWGN_recall": 1.0,
+      "Rayleigh fading_recall": 1.0,
+      "Tone interference_recall": 0.995
+    }
+  ],
+  "note": "AWGN and Rayleigh classes use the specified SNR. Healthy and tone-interference classes are unchanged by the SNR setting. Each SNR uses fresh synthetic data."
+}

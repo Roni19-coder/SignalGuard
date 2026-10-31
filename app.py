@@ -5,6 +5,8 @@ import base64
 import csv
 import io
 import json
+import sqlite3
+from datetime import datetime
 from pathlib import Path
 import sys
 
@@ -19,7 +21,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
-from flask import Flask, request, render_template_string, redirect
+from flask import Flask, request, render_template_string, redirect, Response, url_for
 
 from signalguard.dataset import extract_features
 from signalguard.impairments import (
@@ -30,6 +32,57 @@ from signalguard.impairments import (
 from signalguard.metrics import calculate_snr_db
 
 app = Flask(__name__)
+app.config["MAX_CONTENT_LENGTH"] = 5 * 1024 * 1024  # 5 MB upload limit
+
+# SQLite database for persistent prediction history.
+HISTORY_DB = ROOT / "results" / "prediction_history.db"
+HISTORY_DB.parent.mkdir(parents=True, exist_ok=True)
+
+
+def init_history_db():
+    """Create the prediction-history table if it does not already exist."""
+    with sqlite3.connect(HISTORY_DB) as connection:
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS prediction_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                analyzed_at TEXT NOT NULL,
+                source_name TEXT NOT NULL,
+                predicted_class TEXT NOT NULL,
+                confidence REAL NOT NULL,
+                measured_snr_db TEXT NOT NULL,
+                sample_count INTEGER NOT NULL
+            )
+            """
+        )
+        connection.commit()
+
+
+def save_prediction_history(source_name, predicted_class, confidence,
+                            measured_snr_db, sample_count):
+    """Save one successful analysis; called only after prediction succeeds."""
+    init_history_db()
+    with sqlite3.connect(HISTORY_DB) as connection:
+        connection.execute(
+            """
+            INSERT INTO prediction_history
+            (analyzed_at, source_name, predicted_class, confidence,
+             measured_snr_db, sample_count)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                datetime.now().astimezone().isoformat(timespec="seconds"),
+                source_name,
+                predicted_class,
+                float(confidence),
+                str(measured_snr_db),
+                int(sample_count),
+            ),
+        )
+        connection.commit()
+
+
+init_history_db()
 
 MODEL_PATH = ROOT / "models" / "signalguard_rf.joblib"
 
@@ -65,6 +118,7 @@ PAGE = r"""
 <meta name="viewport" content="width=device-width, initial-scale=1">
 
 <title>SignalGuard | Signal Intelligence</title>
+<link rel="icon" href="{{ url_for('static', filename='favicon.jpg') }}" type="image/x-icon">
 
 <style>
 :root {
@@ -141,6 +195,27 @@ body {
     font-size: 13px;
 }
 
+.top-actions {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 12px;
+    flex-wrap: wrap;
+}
+.nav-link {
+    display: inline-flex;
+    align-items: center;
+    text-decoration: none;
+    border: 1px solid #354763;
+    background: #111b2e;
+    color: #dce7f8;
+    border-radius: 999px;
+    padding: 8px 13px;
+    font-size: 12px;
+    font-weight: 750;
+}
+.nav-link:hover { border-color: var(--cyan); color: var(--cyan); }
+
 .status {
     border: 1px solid #1c6258;
     background: #102c2b;
@@ -212,6 +287,28 @@ body {
 }
 
 /* FORM */
+
+.upload-divider {
+    height: 1px;
+    background: var(--border);
+    margin: 26px 0 22px;
+}
+
+.upload-heading {
+    text-align: center;
+    color: var(--cyan);
+    font-size: 19px;
+    margin: 0 0 18px;
+}
+
+.field input[type="file"] {
+    padding: 10px;
+    font-size: 13px;
+}
+
+.upload-btn {
+    background: linear-gradient(100deg, #087f8c, #0e9f9a);
+}
 
 .field {
     margin-bottom: 18px;
@@ -529,7 +626,11 @@ body {
             <p>Communication signal intelligence</p>
         </div>
     </div>
-    <div class="status">● ML MODEL LOADED</div>
+    <div class="top-actions">
+        <a class="nav-link" href="/">⌂ Dashboard</a>
+        <a class="nav-link" href="/history">↺ History</a>
+        <div class="status">● ML MODEL LOADED</div>
+    </div>
 </header>
 
 <section class="hero">
@@ -583,6 +684,27 @@ body {
                 Results are simulation-based, not measurements from hardware.
             </p>
         </form>
+
+        <div class="upload-divider"></div>
+        <h3 class="upload-heading">Analyze your own signal</h3>
+        <form method="post" enctype="multipart/form-data">
+            <input type="hidden" name="mode" value="upload">
+            <div class="field">
+                <label for="signal_file">Signal CSV file</label>
+                <input id="signal_file" name="signal_file" type="file"
+                    accept=".csv,text/csv" required>
+                <div class="hint">
+                    Upload a CSV with one column (received BPSK signal) or two columns
+                    (clean reference, received signal). Use numeric samples only, with an optional header.
+                </div>
+            </div>
+            <button class="btn upload-btn" type="submit">
+                ↑ &nbsp; Upload and analyze signal
+            </button>
+            <p class="fine">
+                CSV is processed in memory and is not saved to disk. Maximum file size: 5 MB.
+            </p>
+        </form>
     </section>
 
     <!-- RESULTS BELOW SETUP -->
@@ -596,12 +718,18 @@ body {
                 <div>
                     <h3>02 / Detection result</h3>
                     <div class="sub">
-                        Simulated condition: {{ conditions[selected] }}
+                        {{ result_source }}
                     </div>
                 </div>
-                <span class="pill">
-                    <span class="dot"></span> Analysis complete
-                </span>
+                <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
+                    <span class="pill">
+                        <span class="dot"></span> Analysis complete
+                    </span>
+                    <a class="btn upload-btn" href="{{ url_for('download_result') }}"
+                       style="text-decoration:none; display:inline-flex; align-items:center; justify-content:center;">
+                        ↓ &nbsp; Download result (CSV)
+                    </a>
+                </div>
             </div>
 
             <div class="prediction">{{ prediction }}</div>
@@ -626,7 +754,7 @@ body {
 
                 <div class="stat">
                     <div class="label">Samples</div>
-                    <div class="value">1,000</div>
+                    <div class="value">{{ sample_count }}</div>
                 </div>
 
                 <div class="stat">
@@ -716,6 +844,10 @@ body {
     <div class="eval-chart-grid">
         <div class="eval-chart"><h4>AWGN robustness</h4><p>Correct AWGN detection rate across tested SNR levels.</p>
         {% if robustness_plot %}<img class="plot" src="data:image/png;base64,{{ robustness_plot }}" alt="AWGN detection rate versus SNR">{% else %}<div class="eval-empty">Run <code>py -m signalguard.robustness</code> to generate results/awgn_robustness.csv.</div>{% endif %}</div>
+        <div class="eval-chart"><h4>SNR robustness: accuracy and F1</h4><p>Overall four-class accuracy and macro F1 across fixed SNR levels.</p>
+        {% if snr_robustness_plot %}<img class="plot" src="data:image/png;base64,{{ snr_robustness_plot }}" alt="Accuracy and macro F1 versus SNR">{% else %}<div class="eval-empty">Run <code>py -m signalguard.full_evaluate</code> to generate results/snr_robustness.csv.</div>{% endif %}</div>
+        <div class="eval-chart"><h4>Per-class recall across SNR</h4><p>Recall for each simulated class at each tested SNR level.</p>
+        {% if class_recall_plot %}<img class="plot" src="data:image/png;base64,{{ class_recall_plot }}" alt="Per-class recall versus SNR">{% else %}<div class="eval-empty">Run <code>py -m signalguard.full_evaluate</code> to generate results/snr_robustness.csv.</div>{% endif %}</div>
         <div class="eval-chart"><h4>Confusion matrix</h4><p>Rows are actual classes; columns are predicted classes.</p>
         {% if confusion_plot %}<img class="plot" src="data:image/png;base64,{{ confusion_plot }}" alt="Model confusion matrix">{% else %}<div class="eval-empty">A saved four-class confusion matrix was not found. Run <code>py -m signalguard.full_evaluate</code> to generate it.</div>{% endif %}</div>
         <div class="eval-chart"><h4>Permutation feature importance</h4><p>Accuracy decrease after shuffling a feature on the held-out simulation test set.</p>
@@ -913,9 +1045,74 @@ def load_dashboard_context():
         "evaluation_time": evaluation_time,
         "evaluation_source": evaluation_source,
         "robustness_plot": None,
+        "snr_robustness_plot": None,
+        "class_recall_plot": None,
         "confusion_plot": None,
         "permutation_plot": None,
     }
+
+    # Load the fixed-SNR evaluation saved by full_evaluate.py.
+    # This only reads existing results; it never runs model evaluation.
+    snr_robustness_path = ROOT / "results" / "snr_robustness.csv"
+    if snr_robustness_path.exists():
+        try:
+            with snr_robustness_path.open("r", newline="", encoding="utf-8") as file:
+                rows = list(csv.DictReader(file))
+
+            if rows:
+                xs = [float(row["snr_db"]) for row in rows]
+
+                def as_percent(value):
+                    number = float(value)
+                    return number * 100 if number <= 1 else number
+
+                accuracy_values = [as_percent(row["accuracy"]) for row in rows]
+                f1_values = [as_percent(row["macro_f1"]) for row in rows]
+
+                fig, ax = plt.subplots(figsize=(7, 3.6))
+                ax.plot(xs, accuracy_values, marker="o", linewidth=2,
+                        label="Accuracy", color="#22d3ee")
+                ax.plot(xs, f1_values, marker="s", linewidth=2,
+                        label="Macro F1", color="#60a5fa")
+                ax.set_xlabel("SNR (dB)")
+                ax.set_ylabel("Score (%)")
+                ax.set_title("Four-class performance versus SNR")
+                ax.set_ylim(0, 105)
+                ax.set_xticks(xs)
+                ax.legend(facecolor="#17243a", edgecolor="#354763",
+                          labelcolor="#e8eef9")
+                dashboard_plot_style(ax, fig)
+                context["snr_robustness_plot"] = figure_to_base64(fig)
+
+                recall_fields = [
+                    ("Healthy_recall", "Healthy", "#22d3ee"),
+                    ("AWGN_recall", "AWGN", "#60a5fa"),
+                    ("Rayleigh fading_recall", "Rayleigh fading", "#34d399"),
+                    ("Tone interference_recall", "Tone interference", "#fbbf24"),
+                ]
+                fig, ax = plt.subplots(figsize=(7, 3.8))
+                plotted = False
+                for field, label, color in recall_fields:
+                    if field in rows[0]:
+                        values = [as_percent(row[field]) for row in rows]
+                        ax.plot(xs, values, marker="o", linewidth=1.8,
+                                label=label, color=color)
+                        plotted = True
+
+                if plotted:
+                    ax.set_xlabel("SNR (dB)")
+                    ax.set_ylabel("Recall (%)")
+                    ax.set_title("Per-class recall versus SNR")
+                    ax.set_ylim(0, 105)
+                    ax.set_xticks(xs)
+                    ax.legend(facecolor="#17243a", edgecolor="#354763",
+                              labelcolor="#e8eef9", fontsize=8)
+                    dashboard_plot_style(ax, fig)
+                    context["class_recall_plot"] = figure_to_base64(fig)
+                else:
+                    plt.close(fig)
+        except (OSError, ValueError, KeyError, TypeError):
+            pass
 
     robustness_path = ROOT / "results" / "awgn_robustness.csv"
     if robustness_path.exists():
@@ -986,12 +1183,74 @@ def load_dashboard_context():
     return context
 
 
+def parse_uploaded_signal(file_storage):
+    """Parse a numeric CSV containing received samples or clean/received pairs."""
+    if file_storage is None or not file_storage.filename:
+        raise ValueError("Choose a CSV file before uploading.")
+    if Path(file_storage.filename).suffix.lower() != ".csv":
+        raise ValueError("Only .csv files are supported.")
+
+    raw = file_storage.read()
+    if not raw:
+        raise ValueError("The uploaded CSV file is empty.")
+    try:
+        content = raw.decode("utf-8-sig")
+    except UnicodeDecodeError as exc:
+        raise ValueError("The CSV must be encoded as UTF-8.") from exc
+
+    rows = []
+    header_skipped = False
+    for line_number, row in enumerate(csv.reader(io.StringIO(content)), start=1):
+        if not row or all(not cell.strip() for cell in row):
+            continue
+        values = []
+        try:
+            values = [float(cell.strip()) for cell in row if cell.strip()]
+            if len(values) != len(row):
+                raise ValueError
+        except ValueError:
+            # Permit exactly one optional header row. Reject malformed data rows.
+            if not rows and not header_skipped:
+                header_skipped = True
+                continue
+            raise ValueError(f"Row {line_number} contains a non-numeric or empty value.")
+        if len(values) not in (1, 2):
+            raise ValueError(f"Row {line_number} must contain one or two numeric columns.")
+        rows.append(values)
+        if len(rows) > 100000:
+            raise ValueError("The CSV may contain at most 100,000 samples.")
+
+    if len(rows) < 32:
+        raise ValueError("The CSV must contain at least 32 signal samples.")
+    widths = {len(row) for row in rows}
+    if len(widths) != 1:
+        raise ValueError("Every CSV row must have the same number of columns.")
+
+    data = np.asarray(rows, dtype=float)
+    if not np.all(np.isfinite(data)):
+        raise ValueError("The CSV contains NaN or infinite values.")
+
+    if data.shape[1] == 2:
+        clean = data[:, 0]
+        received = data[:, 1]
+        source = "Uploaded signal · clean reference and received samples"
+    else:
+        received = data[:, 0]
+        # The model was trained on BPSK-like samples with a clean reference.
+        # For a single-column upload, estimate that reference using hard decisions.
+        clean = np.where(np.real(received) >= 0, 1.0, -1.0)
+        source = "Uploaded signal · reference estimated from BPSK hard decisions"
+
+    return clean, received, source
+
+
 PENDING_RESULT = None
+LATEST_RESULT = None
 
 
 @app.route("/", methods=["GET", "POST"])
 def index():
-    global PENDING_RESULT
+    global PENDING_RESULT, LATEST_RESULT
     selected = "awgn"
     snr = 5
 
@@ -1001,52 +1260,53 @@ def index():
         "snr": snr,
         "result": False,
         "error": None,
+        "result_source": "",
+        "sample_count": "—",
     }
 
     if request.method == "POST":
+        mode = request.form.get("mode", "simulate")
         selected = request.form.get("condition", "awgn")
 
+        source_name = ""
         try:
-            snr = int(request.form.get("snr", "5"))
-
-            if selected not in CONDITIONS:
-                raise ValueError("Select a valid channel condition.")
-
-            if not -10 <= snr <= 30:
-                raise ValueError("SNR must be between -10 and 30 dB.")
-
-            rng = np.random.default_rng()
-            clean = rng.choice(
-                np.array([-1.0, 1.0]),
-                size=1000,
-            )
-
-            if selected == "healthy":
-                received = clean.copy()
-
-            elif selected == "awgn":
-                received = add_awgn(
-                    clean,
-                    snr_db=snr,
-                    seed=None,
+            if mode == "upload":
+                uploaded_file = request.files.get("signal_file")
+                source_name = Path(uploaded_file.filename).name if uploaded_file and uploaded_file.filename else "Uploaded CSV"
+                clean, received, result_source = parse_uploaded_signal(
+                    uploaded_file
                 )
-
-            elif selected == "rayleigh":
-                received = apply_rayleigh_fading(
-                    clean,
-                    seed=None,
-                )
-
+                snr = 5
             else:
-                received = add_tone_interference(
-                    clean,
-                    frequency_cycles_per_sample=0.05,
-                    amplitude=0.5,
-                )
+                snr = int(request.form.get("snr", "5"))
+                if selected not in CONDITIONS:
+                    raise ValueError("Select a valid channel condition.")
+                if not -10 <= snr <= 30:
+                    raise ValueError("SNR must be between -10 and 30 dB.")
 
-            # Extract the same features used during training
+                rng = np.random.default_rng()
+                clean = rng.choice(np.array([-1.0, 1.0]), size=1000)
+
+                if selected == "healthy":
+                    received = clean.copy()
+                elif selected == "awgn":
+                    received = add_awgn(clean, snr_db=snr, seed=None)
+                elif selected == "rayleigh":
+                    received = apply_rayleigh_fading(clean, seed=None)
+                else:
+                    received = add_tone_interference(
+                        clean,
+                        frequency_cycles_per_sample=0.05,
+                        amplitude=0.5,
+                    )
+                result_source = f"Simulated condition: {CONDITIONS[selected]}"
+                source_name = f"Simulation — {CONDITIONS[selected]}"
+
+            if len(clean) != len(received):
+                raise ValueError("Clean reference and received signal must have the same number of samples.")
+
+            # Extract the same features used during model training.
             features = extract_features(clean, received)
-
             x = np.array(
                 [[float(features[name]) for name in feature_names]],
                 dtype=float,
@@ -1055,7 +1315,6 @@ def index():
             pred_id = int(model.predict(x)[0])
             probs = model.predict_proba(x)[0]
             class_ids = list(model.classes_)
-
             prob_by_id = {
                 int(class_id): float(prob) * 100
                 for class_id, prob in zip(class_ids, probs)
@@ -1066,21 +1325,14 @@ def index():
                 if 0 <= pred_id < len(CLASS_NAMES)
                 else str(pred_id)
             )
-
             confidence = prob_by_id.get(pred_id, 0.0)
-
             probabilities = [
                 (name, prob_by_id.get(i, 0.0))
                 for i, name in enumerate(CLASS_NAMES)
             ]
 
             measured_snr = calculate_snr_db(clean, received)
-
-            if not np.isfinite(measured_snr):
-                snr_display = "∞"
-            else:
-                snr_display = f"{measured_snr:.2f}"
-
+            snr_display = "∞" if not np.isfinite(measured_snr) else f"{measured_snr:.2f}"
             wave_plot, fft_plot = make_plots(received)
 
             context.update({
@@ -1093,7 +1345,39 @@ def index():
                 "snr_display": snr_display,
                 "wave_plot": wave_plot,
                 "fft_plot": fft_plot,
+                "result_source": result_source,
+                "sample_count": f"{len(received):,}",
             })
+
+            # Record successful analyses once, at POST time—not on refresh.
+            save_prediction_history(
+                source_name=source_name or result_source,
+                predicted_class=prediction,
+                confidence=confidence,
+                measured_snr_db=snr_display,
+                sample_count=len(received),
+            )
+
+            # Keep the latest successful analysis available for CSV download.
+            LATEST_RESULT = {
+                "analyzed_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+                "source": source_name or result_source,
+                "result_source": result_source,
+                "predicted_class": prediction,
+                "confidence_percent": round(float(confidence), 2),
+                "measured_snr_db": snr_display,
+                "sample_count": len(received),
+                "probabilities": [
+                    {"class": name, "probability_percent": round(float(prob), 2)}
+                    for name, prob in probabilities
+                ],
+                "features": {
+                    str(name): (
+                        float(value) if np.isfinite(float(value)) else str(value)
+                    )
+                    for name, value in features.items()
+                },
+            }
 
         except Exception as exc:
             context.update({
@@ -1109,7 +1393,8 @@ def index():
                 key: context[key]
                 for key in (
                     "selected", "snr", "result", "prediction", "confidence",
-                    "probabilities", "snr_display", "wave_plot", "fft_plot"
+                    "probabilities", "snr_display", "wave_plot", "fft_plot",
+                    "result_source", "sample_count"
                 )
             }
             return redirect("/")
@@ -1126,6 +1411,249 @@ def index():
     response.headers["Pragma"] = "no-cache"
     response.headers["Expires"] = "0"
 
+    return response
+
+
+
+HISTORY_PAGE = r"""
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SignalGuard | Prediction History</title>
+<style>
+:root { --bg:#080e1b; --panel:#111b2e; --text:#e8eef9; --muted:#94a3b8; --cyan:#22d3ee; --blue:#60a5fa; --border:#26364f; }
+* { box-sizing:border-box; }
+body { margin:0; background:var(--bg); color:var(--text); font:15px/1.6 "Segoe UI",Arial,sans-serif; }
+.wrap { width:min(1240px,100%); margin:auto; padding:28px 24px 42px; }
+.top { display:flex; justify-content:space-between; align-items:center; gap:18px; flex-wrap:wrap; margin-bottom:30px; }
+.brand { display:flex; align-items:center; gap:13px; }
+.logo { width:48px; height:48px; display:grid; place-items:center; border-radius:14px; color:white; font-size:25px; font-weight:800; background:linear-gradient(135deg,#1959a6,#10b9bd); }
+h1 { margin:0; color:#67e8f9; font-size:32px; line-height:1.2; }
+.brand p { margin:3px 0 0; color:var(--muted); font-size:13px; }
+.actions { display:flex; gap:10px; flex-wrap:wrap; align-items:center; }
+.link,.btn { display:inline-flex; align-items:center; justify-content:center; text-decoration:none; border:1px solid #354763; border-radius:9px; padding:10px 14px; background:#17243a; color:var(--text); font:inherit; font-size:13px; font-weight:750; cursor:pointer; }
+.link:hover { border-color:var(--cyan); color:var(--cyan); }
+.btn-primary { border:0; background:linear-gradient(100deg,#1959a6,#2678cf); color:white; }
+.btn-danger { border:1px solid #7f3340; background:#351923; color:#fda4af; }
+.hero { margin:20px 0 25px; }
+.eyebrow { color:var(--blue); font-size:11px; font-weight:800; letter-spacing:2px; text-transform:uppercase; }
+.hero h2 { font-size:clamp(27px,4vw,38px); line-height:1.2; margin:9px 0; letter-spacing:-1px; }
+.hero p,.muted { color:var(--muted); }
+.panel { background:var(--panel); border:1px solid var(--border); border-radius:18px; padding:22px; box-shadow:0 8px 30px rgba(0,0,0,.2); margin-bottom:20px; }
+.stats { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:13px; margin-bottom:20px; }
+.stat { background:#17243a; border:1px solid var(--border); border-radius:12px; padding:15px; }
+.stat span { color:var(--muted); font-size:11px; text-transform:uppercase; letter-spacing:.6px; }
+.stat strong { display:block; font-size:25px; margin-top:4px; }
+.filters { display:grid; grid-template-columns:2fr 1fr auto; gap:12px; align-items:end; }
+label { display:block; margin-bottom:6px; font-weight:650; font-size:13px; }
+input,select { width:100%; padding:11px 12px; border-radius:9px; border:1px solid #354763; background:#0b1425; color:var(--text); font:inherit; }
+.table-wrap { overflow-x:auto; }
+table { width:100%; border-collapse:collapse; min-width:820px; }
+th,td { padding:13px 12px; border-bottom:1px solid var(--border); text-align:left; vertical-align:top; }
+th { color:var(--muted); font-size:11px; text-transform:uppercase; letter-spacing:.6px; white-space:nowrap; }
+td { font-size:13px; }
+.class-pill { display:inline-block; border:1px solid #235a69; background:#102c3a; color:#67e8f9; border-radius:999px; padding:4px 9px; font-size:11px; font-weight:750; white-space:nowrap; }
+.empty { padding:35px 16px; text-align:center; color:var(--muted); border:1px dashed #354763; border-radius:12px; }
+.table-actions { display:flex; justify-content:space-between; align-items:center; gap:12px; flex-wrap:wrap; margin-bottom:16px; }
+.footer { color:#64748b; font-size:11px; text-align:center; margin-top:26px; }
+@media(max-width:700px) { .wrap{padding:20px 13px 30px}.filters{grid-template-columns:1fr}.stats{grid-template-columns:1fr}.panel{padding:16px}.top{align-items:flex-start}h1{font-size:27px} }
+</style>
+</head>
+<body>
+<div class="wrap">
+<header class="top">
+  <div class="brand"><div class="logo">S</div><div><h1>SignalGuard</h1><p>Prediction history</p></div></div>
+  <div class="actions"><a class="link" href="/">⌂ Dashboard</a><a class="link" href="/history">↺ History</a></div>
+</header>
+<section class="hero">
+  <div class="eyebrow">Analysis records</div>
+  <h2>Your signal analysis history.</h2>
+  <p>Successful simulations and CSV analyses are saved locally in SQLite, including after restarting the Flask app.</p>
+</section>
+<div class="stats">
+  <div class="stat"><span>Total records</span><strong>{{ total_count }}</strong></div>
+  <div class="stat"><span>Filtered results</span><strong>{{ records|length }}</strong></div>
+  <div class="stat"><span>Most recent class</span><strong style="font-size:17px">{{ latest_class }}</strong></div>
+</div>
+<section class="panel">
+  <form method="get" action="/history" class="filters">
+    <div><label for="q">Search filename or predicted class</label><input id="q" name="q" value="{{ q }}" placeholder="e.g. signalguard_test_awgn"></div>
+    <div><label for="condition">Filter by condition</label><select id="condition" name="condition">
+      <option value="">All conditions</option>
+      {% for item in class_names %}<option value="{{ item }}" {% if condition == item %}selected{% endif %}>{{ item }}</option>{% endfor %}
+    </select></div>
+    <button class="btn btn-primary" type="submit">Apply filters</button>
+  </form>
+</section>
+<section class="panel">
+  <div class="table-actions">
+    <div><strong>Previous analyses</strong><div class="muted" style="font-size:12px">Newest records appear first.</div></div>
+    <div class="actions">
+      <a class="link" href="/history/export">↓ Export CSV</a>
+      <form method="post" action="/history/clear" onsubmit="return confirm('Delete all prediction history? This cannot be undone.');">
+        <button class="btn btn-danger" type="submit">Clear history</button>
+      </form>
+    </div>
+  </div>
+  {% if records %}
+  <div class="table-wrap"><table>
+    <thead><tr><th>ID</th><th>Analyzed at</th><th>Source / filename</th><th>Predicted condition</th><th>Confidence</th><th>Measured SNR</th><th>Samples</th></tr></thead>
+    <tbody>{% for row in records %}<tr>
+      <td>{{ row["id"] }}</td><td>{{ row["analyzed_at"] }}</td><td>{{ row["source_name"] }}</td>
+      <td><span class="class-pill">{{ row["predicted_class"] }}</span></td>
+      <td>{{ "%.1f"|format(row["confidence"]) }}%</td><td>{{ row["measured_snr_db"] }}{% if row["measured_snr_db"] != "∞" %} dB{% endif %}</td><td>{{ "{:,}".format(row["sample_count"]) }}</td>
+    </tr>{% endfor %}</tbody>
+  </table></div>
+  {% else %}
+  <div class="empty">No matching history records yet.<br>Analyze a simulated signal or upload a CSV from the dashboard to create your first record.</div>
+  {% endif %}
+</section>
+<div class="footer">SignalGuard · Local prediction history · Stored on this machine</div>
+</div>
+<script>
+  // If the History page is refreshed, return to the main Dashboard.
+  // Opening History normally still works; only a browser reload redirects.
+  (function () {
+    const navigation = performance.getEntriesByType("navigation")[0];
+    if (navigation && navigation.type === "reload") {
+      window.location.replace("/");
+    }
+  })();
+</script>
+</body>
+</html>
+"""
+
+
+@app.route("/download-result", methods=["GET"])
+def download_result():
+    """Download the latest successful signal analysis as a CSV report."""
+    if LATEST_RESULT is None:
+        return (
+            "No analysis result is available yet. Analyze a signal first.",
+            404,
+            {"Content-Type": "text/plain; charset=utf-8"},
+        )
+
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(["SignalGuard Analysis Result"])
+    writer.writerow(["Analyzed at", LATEST_RESULT["analyzed_at"]])
+    writer.writerow(["Source", LATEST_RESULT["source"]])
+    writer.writerow(["Analysis details", LATEST_RESULT["result_source"]])
+    writer.writerow(["Predicted class", LATEST_RESULT["predicted_class"]])
+    writer.writerow(["Confidence (%)", LATEST_RESULT["confidence_percent"]])
+    writer.writerow(["Measured SNR (dB)", LATEST_RESULT["measured_snr_db"]])
+    writer.writerow(["Sample count", LATEST_RESULT["sample_count"]])
+    writer.writerow([])
+    writer.writerow(["Class probabilities"])
+    writer.writerow(["Class", "Probability (%)"])
+    for item in LATEST_RESULT["probabilities"]:
+        writer.writerow([item["class"], item["probability_percent"]])
+    writer.writerow([])
+    writer.writerow(["Extracted features"])
+    writer.writerow(["Feature", "Value"])
+    for name, value in LATEST_RESULT["features"].items():
+        writer.writerow([name, value])
+
+    response = Response(
+        output.getvalue(),
+        mimetype="text/csv; charset=utf-8",
+        headers={
+            "Content-Disposition": 'attachment; filename="signalguard_analysis_result.csv"'
+        },
+    )
+    return response
+
+
+@app.route("/history", methods=["GET"])
+def history():
+    q = request.args.get("q", "").strip()
+    condition = request.args.get("condition", "").strip()
+    where = []
+    params = []
+    if q:
+        where.append("(source_name LIKE ? OR predicted_class LIKE ?)")
+        params.extend([f"%{q}%", f"%{q}%"])
+    if condition in CLASS_NAMES:
+        where.append("predicted_class = ?")
+        params.append(condition)
+
+    query = "SELECT * FROM prediction_history"
+    if where:
+        query += " WHERE " + " AND ".join(where)
+    query += " ORDER BY id DESC"
+
+    with sqlite3.connect(HISTORY_DB) as connection:
+        connection.row_factory = sqlite3.Row
+        records = [dict(row) for row in connection.execute(query, params).fetchall()]
+        total_count = connection.execute(
+            "SELECT COUNT(*) FROM prediction_history"
+        ).fetchone()[0]
+        latest = connection.execute(
+            "SELECT predicted_class FROM prediction_history ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+
+    response = app.make_response(render_template_string(
+        HISTORY_PAGE,
+        records=records,
+        q=q,
+        condition=condition,
+        class_names=CLASS_NAMES,
+        total_count=total_count,
+        latest_class=latest[0] if latest else "—",
+    ))
+    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    response.headers["Pragma"] = "no-cache"
+    return response
+
+
+@app.route("/history/export", methods=["GET"])
+def export_history():
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow([
+        "id", "analyzed_at", "source_name", "predicted_class",
+        "confidence_percent", "measured_snr_db", "sample_count"
+    ])
+    with sqlite3.connect(HISTORY_DB) as connection:
+        rows = connection.execute(
+            """
+            SELECT id, analyzed_at, source_name, predicted_class,
+                   confidence, measured_snr_db, sample_count
+            FROM prediction_history ORDER BY id DESC
+            """
+        ).fetchall()
+    writer.writerows(rows)
+    return Response(
+        output.getvalue(),
+        mimetype="text/csv; charset=utf-8",
+        headers={"Content-Disposition": "attachment; filename=signalguard_prediction_history.csv"},
+    )
+
+
+@app.route("/history/clear", methods=["POST"])
+def clear_history():
+    with sqlite3.connect(HISTORY_DB) as connection:
+        connection.execute("DELETE FROM prediction_history")
+        connection.commit()
+    return redirect(url_for("history"))
+
+
+@app.errorhandler(413)
+def upload_too_large(_error):
+    context = {
+        "conditions": CONDITIONS,
+        "selected": "awgn",
+        "snr": 5,
+        "result": False,
+        "error": "Upload too large. Please choose a CSV smaller than 5 MB.",
+    }
+    context.update(load_dashboard_context())
+    response = app.make_response(render_template_string(PAGE, **context))
+    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
     return response
 
 

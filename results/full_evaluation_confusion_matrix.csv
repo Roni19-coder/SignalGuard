@@ -1,5 +1,5 @@
 Actual / Predicted,Healthy,AWGN,Rayleigh fading,Tone interference
 Healthy,500,0,0,0
 AWGN,0,500,0,0
-Rayleigh fading,0,1,499,0
+Rayleigh fading,0,0,500,0
 Tone interference,0,1,0,499
